@@ -2,21 +2,17 @@ import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import { createBackendApp } from './server/src/app';
 import { closeDatabase, connectToDatabase } from './server/src/config/database';
-import { apiRouter } from './server/src/routes/api';
 
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
 async function startServer() {
-  // Connect Mongoose & seed initial AgroLens MongoDB collections before listening
+  // Connect Mongoose & seed initial AgroLens MongoDB collections before listening locally
   await connectToDatabase();
 
-  const app = express();
-  app.use(express.json({ limit: '2mb' }));
-
-  // Mount AgroLens REST API
-  app.use('/api', apiRouter);
+  const app = createBackendApp({ standaloneApiServer: false });
 
   if (!isProduction) {
     const vite = await createViteServer({
@@ -33,7 +29,7 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`AgroLens server listening on http://0.0.0.0:${PORT}`);
+    console.log(`AgroLens local server listening on http://0.0.0.0:${PORT}`);
   });
 
   const shutdown = async () => {

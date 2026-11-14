@@ -1,5 +1,13 @@
-import React from 'react';
-import { BookOpen, Database, Scale, ShieldCheck, User as UserIcon } from 'lucide-react';
+import React, { useState } from 'react';
+import { BookOpen, CheckCircle2, Database, Globe, RefreshCw, Scale, ShieldCheck, User as UserIcon } from 'lucide-react';
+import {
+  API_ENDPOINTS,
+  getApiEnvironmentMode,
+  resolveApiBaseUrl,
+  setApiEnvironmentMode,
+  type ApiEnvironmentMode,
+} from '../../config/env';
+import { api } from '../../services/api';
 import type { Farm, User } from '../../types/agrolens';
 
 export function HelpAndMethodologyView() {
@@ -80,6 +88,36 @@ export function SettingsView({
   activeFarm: Farm;
   onSignOut: () => void;
 }) {
+  const [envMode, setEnvMode] = useState<ApiEnvironmentMode>(getApiEnvironmentMode);
+  const [checkingHealth, setCheckingHealth] = useState(false);
+  const [healthResult, setHealthResult] = useState<string | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+
+  const activeBaseUrl = resolveApiBaseUrl();
+
+  function handleChangeEnv(mode: ApiEnvironmentMode) {
+    setApiEnvironmentMode(mode);
+    setEnvMode(mode);
+    setHealthResult(null);
+    setHealthError(null);
+  }
+
+  async function handleTestBackend() {
+    setCheckingHealth(true);
+    setHealthResult(null);
+    setHealthError(null);
+    try {
+      const res = await api.health();
+      setHealthResult(
+        `Connected (${res.database.runtime || 'node'} · ${res.orm} · DB: ${res.database.dbName} · ${res.database.mode})`
+      );
+    } catch (err) {
+      setHealthError(err instanceof Error ? err.message : 'Unable to reach selected backend');
+    } finally {
+      setCheckingHealth(false);
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-3xl">
       <section className="bg-white border border-[#DFEBDF] rounded-2xl p-6 space-y-4">
@@ -106,7 +144,7 @@ export function SettingsView({
           <div className="p-4 rounded-xl bg-[#F4F9F4] border border-[#DFEBDF]">
             <p className="text-xs text-[#4B6352]">Active Farm</p>
             <p className="font-bold text-[#0F1F14] mt-0.5">
-              {activeFarm.name} ({activeFarm.state})
+              {activeFarm.name} ({activeFarm.city ? `${activeFarm.city}, ` : ''}{activeFarm.state})
             </p>
           </div>
         </div>
@@ -129,6 +167,77 @@ export function SettingsView({
           </button>
         </div>
       </section>
+
+      <section className="bg-white border border-[#DFEBDF] rounded-2xl p-6 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-display text-lg font-bold text-[#0F1F14] flex items-center gap-2">
+            <Globe className="w-5 h-5 text-[#15803D]" />
+            API Environment Configuration
+          </h2>
+          <span className="font-mono text-xs text-[#0B4D1E] bg-[#EAF6EB] px-2.5 py-1 rounded-md">
+            Active: {activeBaseUrl}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <button
+            type="button"
+            onClick={() => handleChangeEnv('auto')}
+            className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+              envMode === 'auto'
+                ? 'border-[#16A34A] bg-[#F4FAF4]'
+                : 'border-[#DFEBDF] hover:bg-[#FAFDF9]'
+            }`}
+          >
+            <p className="font-bold text-[#0F1F14]">Auto-Detect</p>
+            <p className="text-[#4B6352] mt-0.5">Local on localhost, Vercel in hosted builds</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleChangeEnv('local')}
+            className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+              envMode === 'local'
+                ? 'border-[#16A34A] bg-[#F4FAF4]'
+                : 'border-[#DFEBDF] hover:bg-[#FAFDF9]'
+            }`}
+          >
+            <p className="font-bold text-[#0F1F14]">Local Express Server</p>
+            <p className="font-mono text-[11px] text-[#4B6352] mt-0.5 truncate">{API_ENDPOINTS.localAbsolute}</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleChangeEnv('production')}
+            className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+              envMode === 'production'
+                ? 'border-[#16A34A] bg-[#F4FAF4]'
+                : 'border-[#DFEBDF] hover:bg-[#FAFDF9]'
+            }`}
+          >
+            <p className="font-bold text-[#0F1F14]">Vercel Serverless</p>
+            <p className="font-mono text-[11px] text-[#4B6352] mt-0.5 truncate">{API_ENDPOINTS.production}</p>
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleTestBackend}
+            disabled={checkingHealth}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#0B4D1E] text-white text-xs font-semibold hover:bg-[#146C2E] transition-colors cursor-pointer disabled:opacity-60"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${checkingHealth ? 'animate-spin' : ''}`} />
+            {checkingHealth ? 'Checking Connection...' : 'Verify Backend Health'}
+          </button>
+          {healthResult && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#15803D]">
+              <CheckCircle2 className="w-4 h-4" />
+              {healthResult}
+            </span>
+          )}
+          {healthError && <span className="text-xs font-semibold text-red-700">{healthError}</span>}
+        </div>
+      </section>
     </div>
   );
 }
+

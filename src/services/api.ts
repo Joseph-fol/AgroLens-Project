@@ -1,3 +1,4 @@
+import { resolveApiBaseUrl } from '../config/env';
 import type {
   AnalysisRecord,
   ClimateObservationRecord,
@@ -32,7 +33,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const res = await fetch(`/api${path}`, {
+  const baseUrl = resolveApiBaseUrl();
+  const res = await fetch(`${baseUrl}${path}`, {
     ...options,
     headers,
   });
@@ -45,6 +47,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  health: () =>
+    request<{
+      status: string;
+      service: string;
+      orm: string;
+      database: {
+        connected: boolean;
+        readyState: number;
+        dbName: string;
+        mode: string;
+        runtime?: string;
+      };
+    }>('/health'),
+
   auth: {
     register: (payload: {
       fullName: string;
