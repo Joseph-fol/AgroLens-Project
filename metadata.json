@@ -1,0 +1,6 @@
+{
+  "name": "AgroLens",
+  "description": "Agricultural decision-support platform combining NASA Earth observation data, local soil information, crop intelligence, and farmer priorities to compare crop rotation strategies in Oyo State, Nigeria.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
