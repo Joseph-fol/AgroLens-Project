@@ -7,6 +7,7 @@ export interface User {
   phone?: string;
   state: string;
   lga?: string;
+  city?: string;
   role: UserRole;
   createdAt: string;
 }
@@ -22,6 +23,7 @@ export interface Farm {
   name: string;
   state: string;
   lga: string;
+  city?: string;
   latitude: number;
   longitude: number;
   boundary?: CoordinatePoint[];

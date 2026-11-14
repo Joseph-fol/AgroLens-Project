@@ -58,12 +58,14 @@ export default function App() {
   const [analysis, setAnalysis] = useState<AnalysisRecord | null>(null);
   const [runningAnalysis, setRunningAnalysis] = useState(false);
   const [reviews, setReviews] = useState<ExtensionReview[]>([]);
+  const [apiError, setApiError] = useState<string>('');
 
   const activeFarm = farms.find((f) => f.id === activeFarmId) || farms[0] || null;
 
   const loadFarmWorkspaceData = useCallback(
     async (farmId: string, days: number) => {
       setLoadingClimate(true);
+      setApiError('');
       try {
         const [farmDetail, climateRes, analysisRes] = await Promise.all([
           api.farms.get(farmId),
@@ -77,6 +79,8 @@ export default function App() {
 
         const revRes = await api.reviews.list(analysisRes.analysis.id);
         setReviews(revRes.reviews);
+      } catch (err) {
+        setApiError(err instanceof Error ? err.message : 'Failed to load farm data from MongoDB.');
       } finally {
         setLoadingClimate(false);
       }
@@ -85,6 +89,7 @@ export default function App() {
   );
 
   const bootstrapWorkspace = useCallback(async () => {
+    setApiError('');
     const [farmsRes, cropsRes] = await Promise.all([api.farms.list(), api.crops.list()]);
     setFarms(farmsRes.farms);
     setCrops(cropsRes.crops);
@@ -112,7 +117,14 @@ export default function App() {
   }, [bootstrapWorkspace]);
 
   async function handleEnterDemo() {
-    setUser(DEMO_GUEST_USER);
+    setApiError('');
+    try {
+      const res = await api.auth.login({ email: 'joseph@agrolens.ng', password: 'agrolens2026' });
+      setStoredToken(res.token);
+      setUser(res.user);
+    } catch {
+      setUser(DEMO_GUEST_USER);
+    }
     setRoute('dashboard');
     setActiveTab('overview');
     await bootstrapWorkspace();
@@ -225,6 +237,18 @@ export default function App() {
       onSelectFarm={handleSelectFarm}
       onSignOut={handleSignOut}
     >
+      {apiError && (
+        <div className="mb-4 rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-xs font-medium text-red-800 flex items-center justify-between gap-3">
+          <span>{apiError}</span>
+          <button
+            type="button"
+            onClick={() => setApiError('')}
+            className="underline font-semibold cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {activeTab === 'overview' && (
         <OverviewView
           user={activeUser}

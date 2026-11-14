@@ -227,7 +227,7 @@ export function DashboardLayout({
               >
                 {farms.map((f) => (
                   <option key={f.id} value={f.id}>
-                    {f.name} · {f.state}
+                    {f.name} · {f.city ? `${f.city}, ` : ''}{f.lga}, {f.state}
                   </option>
                 ))}
               </select>

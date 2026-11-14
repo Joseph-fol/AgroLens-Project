@@ -96,7 +96,7 @@ export function DecisionReportsView({
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.text(
-      `Location: ${farm.lga}, ${farm.state} (${farm.latitude.toFixed(4)}N, ${farm.longitude.toFixed(4)}E) | Area: ${farm.sizeHectares} ha`,
+      `Location: ${farm.city ? `${farm.city}, ` : ''}${farm.lga}, ${farm.state} (${farm.latitude.toFixed(4)}N, ${farm.longitude.toFixed(4)}E) | Area: ${farm.sizeHectares} ha`,
       42,
       y
     );
@@ -243,7 +243,7 @@ export function DecisionReportsView({
               <span className="text-xs font-semibold text-[#15803D]">{farm.sizeHectares} ha</span>
             </div>
             <p className="text-xs text-[#4B6352]">
-              {farm.lga}, {farm.state} · {farm.latitude.toFixed(4)}°N, {farm.longitude.toFixed(4)}°E · Soil:{' '}
+              {farm.city ? `${farm.city}, ` : ''}{farm.lga}, {farm.state} · {farm.latitude.toFixed(4)}°N, {farm.longitude.toFixed(4)}°E · Soil:{' '}
               {farm.soilType}
             </p>
             <div className="pt-2 flex items-start gap-2 text-xs text-[#233B2A]">

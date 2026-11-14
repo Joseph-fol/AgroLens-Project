@@ -293,7 +293,7 @@ export function OverviewView({
                 <div className="flex items-center gap-2">
                   <MapPin className="w-3.5 h-3.5 text-[#16A34A]" />
                   <span>
-                    {farm.lga}, {farm.state}
+                    {farm.city ? `${farm.city}, ` : ''}{farm.lga}, {farm.state}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">

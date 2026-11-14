@@ -1,10 +1,27 @@
 import { Router, type Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { dbStore } from '../config/store';
+import { getDatabaseStatus } from '../config/database';
 import { optionalAuth, requireAuth, signToken, type AuthenticatedRequest } from '../middleware/auth';
+import {
+  AnalysisModel,
+  ClimateObservationModel,
+  ContactMessageModel,
+  CropModel,
+  FarmModel,
+  ReviewModel,
+  RotationPlanModel,
+  SoilProfileModel,
+  UserModel,
+} from '../models/schemas';
 import { fetchNasaPowerForCoordinates } from '../services/nasa/nasaPowerService';
 import { evaluateRotationStrategies } from '../services/rotation/scoringEngine';
+import {
+  forwardGeocodePlace,
+  NIGERIA_LOCATIONS,
+  reverseGeocodeCoordinates,
+} from '../services/location/nigeriaLocations';
 import type {
+  ClimateObservationRecord,
   ExtensionReview,
   FarmerPriorities,
   Farm,
@@ -37,22 +54,32 @@ function sanitizeUser(u: User) {
   };
 }
 
-async function ensureClimateForFarm(farm: Farm, rangeDays = 7) {
-  const existing = dbStore.state.climateObservations
-    .filter((c) => c.farmId === farm.id && c.rangeDays === rangeDays)
-    .sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt))[0];
-
-  if (existing) return existing;
-
-  const fresh = await fetchNasaPowerForCoordinates(farm.id, farm.latitude, farm.longitude, rangeDays);
-  dbStore.state.climateObservations.push(fresh);
-  dbStore.persist();
-  return fresh;
+function stripMongoId<T extends object>(doc: T | null): T | null {
+  if (!doc) return null;
+  const plain = { ...(doc as Record<string, unknown>) };
+  delete plain._id;
+  return plain as T;
 }
 
-function ensureDefaultRotationsForFarm(farmId: string) {
-  const existing = dbStore.state.rotationPlans.filter((r) => r.farmId === farmId);
-  if (existing.length > 0) return existing;
+async function ensureClimateForFarm(farm: Farm, rangeDays = 7): Promise<ClimateObservationRecord> {
+  const existing = await ClimateObservationModel.findOne({ farmId: farm.id, rangeDays })
+    .sort({ fetchedAt: -1 })
+    .lean<ClimateObservationRecord>();
+
+  if (existing) {
+    return stripMongoId(existing)!;
+  }
+
+  const fresh = await fetchNasaPowerForCoordinates(farm.id, farm.latitude, farm.longitude, rangeDays);
+  const created = await ClimateObservationModel.create(fresh);
+  return created.toJSON() as ClimateObservationRecord;
+}
+
+async function ensureDefaultRotationsForFarm(farmId: string): Promise<RotationPlan[]> {
+  const existing = await RotationPlanModel.find({ farmId }).sort({ createdAt: 1 }).lean<RotationPlan[]>();
+  if (existing.length > 0) {
+    return existing.map((doc) => stripMongoId(doc)!);
+  }
 
   const now = new Date().toISOString();
   const defaults: RotationPlan[] = [
@@ -97,14 +124,32 @@ function ensureDefaultRotationsForFarm(farmId: string) {
       createdAt: now,
     },
   ];
-  dbStore.state.rotationPlans.push(...defaults);
-  dbStore.persist();
+  await RotationPlanModel.insertMany(defaults);
   return defaults;
 }
 
-// Health check
-apiRouter.get('/health', (_req, res: Response) => {
-  res.json({ status: 'ok', service: 'AgroLens API', pilotRegion: 'Oyo State, Nigeria' });
+// Health check including live MongoDB connection status
+apiRouter.get('/health', async (_req, res: Response) => {
+  const db = getDatabaseStatus();
+  const [farmsCount, cropsCount, analysesCount] = await Promise.all([
+    FarmModel.countDocuments(),
+    CropModel.countDocuments(),
+    AnalysisModel.countDocuments(),
+  ]);
+  res.json({
+    status: 'ok',
+    service: 'AgroLens API',
+    pilotRegion: 'Oyo State, Nigeria',
+    orm: 'Mongoose',
+    database: {
+      ...db,
+      collections: {
+        farms: farmsCount,
+        crops: cropsCount,
+        analyses: analysesCount,
+      },
+    },
+  });
 });
 
 // ================= AUTHENTICATION =================
@@ -126,7 +171,7 @@ apiRouter.post('/auth/register', async (req, res: Response) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const existing = dbStore.state.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+    const existing = await UserModel.findOne({ email: normalizedEmail }).lean();
     if (existing) {
       res.status(409).json({ error: 'An account with this email already exists.' });
       return;
@@ -134,7 +179,7 @@ apiRouter.post('/auth/register', async (req, res: Response) => {
 
     const validRole: UserRole = role === 'extension_officer' ? 'extension_officer' : 'farmer';
     const passwordHash = await bcrypt.hash(password, 10);
-    const newUser: User = {
+    const created = await UserModel.create({
       id: `user-${Date.now()}`,
       fullName: fullName.trim(),
       email: normalizedEmail,
@@ -144,11 +189,9 @@ apiRouter.post('/auth/register', async (req, res: Response) => {
       role: validRole,
       passwordHash,
       createdAt: new Date().toISOString(),
-    };
+    });
 
-    dbStore.state.users.push(newUser);
-    dbStore.persist();
-
+    const newUser = created.toJSON() as User;
     const token = signToken({
       userId: newUser.id,
       email: newUser.email,
@@ -157,7 +200,7 @@ apiRouter.post('/auth/register', async (req, res: Response) => {
     });
 
     res.status(201).json({ token, user: sanitizeUser(newUser) });
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: 'Failed to register account.' });
   }
 });
@@ -171,9 +214,9 @@ apiRouter.post('/auth/login', async (req, res: Response) => {
     }
 
     const identifier = email.trim().toLowerCase();
-    const user = dbStore.state.users.find(
-      (u) => u.email.toLowerCase() === identifier || (u.phone && u.phone.toLowerCase() === identifier)
-    );
+    const user = await UserModel.findOne({
+      $or: [{ email: identifier }, { phone: email.trim() }],
+    }).lean<User>();
 
     if (!user) {
       res.status(401).json({ error: 'Invalid credentials.' });
@@ -199,8 +242,8 @@ apiRouter.post('/auth/login', async (req, res: Response) => {
   }
 });
 
-apiRouter.get('/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const user = dbStore.state.users.find((u) => u.id === req.user?.userId);
+apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const user = await UserModel.findOne({ id: req.user?.userId }).lean<User>();
   if (!user) {
     res.status(404).json({ error: 'User not found.' });
     return;
@@ -209,132 +252,150 @@ apiRouter.get('/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response
 });
 
 // ================= FARMS =================
-apiRouter.get('/farms', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
-  const all = dbStore.state.farms;
-  // Return pilot farm + user-owned farms (or all farms for extension officer / demo viewing)
-  const visible = req.user
+apiRouter.get('/farms', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const filter = req.user
     ? req.user.role === 'extension_officer' || req.user.role === 'admin'
-      ? all
-      : all.filter((f) => f.ownerId === req.user?.userId || f.isPilotDemo)
-    : all.filter((f) => f.isPilotDemo);
+      ? {}
+      : { $or: [{ ownerId: req.user.userId }, { isPilotDemo: true }] }
+    : { isPilotDemo: true };
 
-  res.json({ farms: visible });
+  const farms = await FarmModel.find(filter).sort({ createdAt: 1 }).lean<Farm[]>();
+  res.json({ farms: farms.map((f) => stripMongoId(f)!) });
 });
 
-apiRouter.get('/farms/:id', optionalAuth, (req, res: Response) => {
-  const farm = dbStore.state.farms.find((f) => f.id === req.params.id);
-  if (!farm) {
+apiRouter.get('/farms/:id', optionalAuth, async (req, res: Response) => {
+  const farmDoc = await FarmModel.findOne({ id: req.params.id }).lean<Farm>();
+  if (!farmDoc) {
     res.status(404).json({ error: 'Farm not found.' });
     return;
   }
-  const soil = dbStore.state.soilProfiles.find((s) => s.farmId === farm.id) || null;
-  res.json({ farm, soil });
+  const soilDoc = await SoilProfileModel.findOne({ farmId: farmDoc.id }).lean<SoilProfile>();
+  res.json({ farm: stripMongoId(farmDoc), soil: stripMongoId(soilDoc) });
 });
 
-apiRouter.post('/farms', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
-  const body = req.body as Partial<Farm>;
-  if (!body.name || body.latitude === undefined || body.longitude === undefined || !body.sizeHectares) {
-    res.status(400).json({ error: 'Farm name, coordinates, and size in hectares are required.' });
-    return;
+apiRouter.post('/farms', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const body = req.body as Partial<Farm>;
+    if (!body.name || body.latitude === undefined || body.longitude === undefined || !body.sizeHectares) {
+      res.status(400).json({ error: 'Farm name, coordinates, and size in hectares are required.' });
+      return;
+    }
+
+    const lat = Number(body.latitude);
+    const lng = Number(body.longitude);
+    const size = Number(body.sizeHectares);
+
+    if (Number.isNaN(lat) || Number.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      res.status(400).json({ error: 'Invalid geographic coordinates.' });
+      return;
+    }
+    if (Number.isNaN(size) || size <= 0) {
+      res.status(400).json({ error: 'Farm size must be greater than zero.' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const delta = Math.sqrt(size) * 0.0008;
+    const farmId = `farm-${Date.now()}`;
+
+    let resolvedState = body.state?.trim() || '';
+    let resolvedLga = body.lga?.trim() || '';
+    let resolvedCity = body.city?.trim() || '';
+
+    if (!resolvedState || !resolvedLga || !resolvedCity) {
+      const geo = await reverseGeocodeCoordinates(lat, lng);
+      if (!resolvedState) resolvedState = geo.state;
+      if (!resolvedLga) resolvedLga = geo.lga;
+      if (!resolvedCity) resolvedCity = geo.city;
+    }
+
+    const createdFarm = await FarmModel.create({
+      id: farmId,
+      ownerId: req.user?.userId || 'user-farmer-joseph',
+      name: body.name.trim(),
+      state: resolvedState || 'Oyo State',
+      lga: resolvedLga || 'Akinyele',
+      city: resolvedCity || '',
+      latitude: Number(lat.toFixed(5)),
+      longitude: Number(lng.toFixed(5)),
+      boundary:
+        body.boundary && body.boundary.length >= 3
+          ? body.boundary
+          : [
+              { lat: lat + delta, lng: lng - delta },
+              { lat: lat + delta, lng: lng + delta },
+              { lat: lat - delta, lng: lng + delta },
+              { lat: lat - delta, lng: lng - delta },
+            ],
+      sizeHectares: size,
+      soilType: body.soilType || 'Loamy Soil',
+      waterSource: body.waterSource || 'Rainfed (Seasonal)',
+      currentCrop: body.currentCrop || 'Maize',
+      previousCrops: Array.isArray(body.previousCrops) ? body.previousCrops : ['Maize'],
+      farmingPractice: body.farmingPractice || 'Mixed Rainfed Smallholder',
+      lastPlantingDate: body.lastPlantingDate || null,
+      expectedHarvestDate: body.expectedHarvestDate || null,
+      isPilotDemo: false,
+      status: 'Active',
+      updatedAt: now,
+      createdAt: now,
+    });
+
+    const createdSoil = await SoilProfileModel.create({
+      id: `soil-${farmId}`,
+      farmId,
+      source: 'untested',
+      labName: null,
+      samplingDate: null,
+      soilTexture: createdFarm.soilType,
+      ph: null,
+      organicMatterPercent: null,
+      nitrogenMgKg: null,
+      phosphorusMgKg: null,
+      potassiumMgKg: null,
+      drainageClass: 'Unknown',
+      notes: 'Soil laboratory measurements have not been recorded yet.',
+      missingFields: ['ph', 'organicMatterPercent', 'nitrogenMgKg', 'phosphorusMgKg', 'potassiumMgKg'],
+      updatedAt: now,
+    });
+
+    await ensureDefaultRotationsForFarm(farmId);
+
+    res.status(201).json({
+      farm: createdFarm.toJSON(),
+      soil: createdSoil.toJSON(),
+    });
+  } catch {
+    res.status(500).json({ error: 'Failed to create farm in MongoDB.' });
   }
-
-  const lat = Number(body.latitude);
-  const lng = Number(body.longitude);
-  const size = Number(body.sizeHectares);
-
-  if (Number.isNaN(lat) || Number.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    res.status(400).json({ error: 'Invalid geographic coordinates.' });
-    return;
-  }
-  if (Number.isNaN(size) || size <= 0) {
-    res.status(400).json({ error: 'Farm size must be greater than zero.' });
-    return;
-  }
-
-  const now = new Date().toISOString();
-  const delta = Math.sqrt(size) * 0.0008;
-  const newFarm: Farm = {
-    id: `farm-${Date.now()}`,
-    ownerId: req.user?.userId || 'user-farmer-joseph',
-    name: body.name.trim(),
-    state: body.state?.trim() || 'Oyo State',
-    lga: body.lga?.trim() || 'Akinyele',
-    latitude: Number(lat.toFixed(5)),
-    longitude: Number(lng.toFixed(5)),
-    boundary:
-      body.boundary && body.boundary.length >= 3
-        ? body.boundary
-        : [
-            { lat: lat + delta, lng: lng - delta },
-            { lat: lat + delta, lng: lng + delta },
-            { lat: lat - delta, lng: lng + delta },
-            { lat: lat - delta, lng: lng - delta },
-          ],
-    sizeHectares: size,
-    soilType: body.soilType || 'Loamy Soil',
-    waterSource: body.waterSource || 'Rainfed (Seasonal)',
-    currentCrop: body.currentCrop || 'Maize',
-    previousCrops: Array.isArray(body.previousCrops) ? body.previousCrops : ['Maize'],
-    farmingPractice: body.farmingPractice || 'Mixed Rainfed Smallholder',
-    lastPlantingDate: body.lastPlantingDate || null,
-    expectedHarvestDate: body.expectedHarvestDate || null,
-    isPilotDemo: false,
-    status: 'Active',
-    updatedAt: now,
-    createdAt: now,
-  };
-
-  dbStore.state.farms.push(newFarm);
-
-  // Create default soil profile with explicit null for missing lab fields
-  const defaultSoil: SoilProfile = {
-    id: `soil-${newFarm.id}`,
-    farmId: newFarm.id,
-    source: 'untested',
-    labName: null,
-    samplingDate: null,
-    soilTexture: newFarm.soilType,
-    ph: null,
-    organicMatterPercent: null,
-    nitrogenMgKg: null,
-    phosphorusMgKg: null,
-    potassiumMgKg: null,
-    drainageClass: 'Unknown',
-    notes: 'Soil laboratory measurements have not been recorded yet.',
-    missingFields: ['ph', 'organicMatterPercent', 'nitrogenMgKg', 'phosphorusMgKg', 'potassiumMgKg'],
-    updatedAt: now,
-  };
-  dbStore.state.soilProfiles.push(defaultSoil);
-  ensureDefaultRotationsForFarm(newFarm.id);
-  dbStore.persist();
-
-  res.status(201).json({ farm: newFarm, soil: defaultSoil });
 });
 
-apiRouter.patch('/farms/:id', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
-  const idx = dbStore.state.farms.findIndex((f) => f.id === req.params.id);
-  if (idx === -1) {
-    res.status(404).json({ error: 'Farm not found.' });
-    return;
+apiRouter.patch('/farms/:id', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const updates = { ...(req.body as Partial<Farm>) };
+    delete updates.id;
+    delete updates.ownerId;
+    updates.updatedAt = new Date().toISOString();
+
+    const updated = await FarmModel.findOneAndUpdate(
+      { id: req.params.id },
+      { $set: updates },
+      { new: true, runValidators: true }
+    ).lean<Farm>();
+
+    if (!updated) {
+      res.status(404).json({ error: 'Farm not found.' });
+      return;
+    }
+
+    res.json({ farm: stripMongoId(updated) });
+  } catch {
+    res.status(400).json({ error: 'Failed to update farm record.' });
   }
-
-  const current = dbStore.state.farms[idx];
-  const updates = req.body as Partial<Farm>;
-  const updated: Farm = {
-    ...current,
-    ...updates,
-    id: current.id,
-    ownerId: current.ownerId,
-    updatedAt: new Date().toISOString(),
-  };
-
-  dbStore.state.farms[idx] = updated;
-  dbStore.persist();
-  res.json({ farm: updated });
 });
 
-apiRouter.delete('/farms/:id', optionalAuth, (req, res: Response) => {
-  const farm = dbStore.state.farms.find((f) => f.id === req.params.id);
+apiRouter.delete('/farms/:id', optionalAuth, async (req, res: Response) => {
+  const farm = await FarmModel.findOne({ id: req.params.id }).lean<Farm>();
   if (!farm) {
     res.status(404).json({ error: 'Farm not found.' });
     return;
@@ -343,19 +404,27 @@ apiRouter.delete('/farms/:id', optionalAuth, (req, res: Response) => {
     res.status(400).json({ error: 'The Oyo Pilot demonstration farm cannot be deleted.' });
     return;
   }
-  dbStore.state.farms = dbStore.state.farms.filter((f) => f.id !== req.params.id);
-  dbStore.persist();
+
+  await Promise.all([
+    FarmModel.deleteOne({ id: req.params.id }),
+    SoilProfileModel.deleteMany({ farmId: req.params.id }),
+    RotationPlanModel.deleteMany({ farmId: req.params.id }),
+    ClimateObservationModel.deleteMany({ farmId: req.params.id }),
+    AnalysisModel.deleteMany({ farmId: req.params.id }),
+    ReviewModel.deleteMany({ farmId: req.params.id }),
+  ]);
+
   res.json({ deleted: true });
 });
 
 // ================= SOIL PROFILES =================
-apiRouter.get('/farms/:id/soil', (req, res: Response) => {
-  const soil = dbStore.state.soilProfiles.find((s) => s.farmId === req.params.id) || null;
-  res.json({ soil });
+apiRouter.get('/farms/:id/soil', async (req, res: Response) => {
+  const soil = await SoilProfileModel.findOne({ farmId: req.params.id }).lean<SoilProfile>();
+  res.json({ soil: stripMongoId(soil) });
 });
 
-apiRouter.post('/farms/:id/soil', optionalAuth, (req, res: Response) => {
-  const farm = dbStore.state.farms.find((f) => f.id === req.params.id);
+apiRouter.post('/farms/:id/soil', optionalAuth, async (req, res: Response) => {
+  const farm = await FarmModel.findOne({ id: req.params.id }).lean<Farm>();
   if (!farm) {
     res.status(404).json({ error: 'Farm not found.' });
     return;
@@ -381,7 +450,7 @@ apiRouter.post('/farms/:id/soil', optionalAuth, (req, res: Response) => {
   if (pVal === null) missingFields.push('phosphorusMgKg');
   if (kVal === null) missingFields.push('potassiumMgKg');
 
-  const soilProfile: SoilProfile = {
+  const payload: SoilProfile = {
     id: `soil-${farm.id}`,
     farmId: farm.id,
     source: body.source || 'farmer_reported',
@@ -399,29 +468,28 @@ apiRouter.post('/farms/:id/soil', optionalAuth, (req, res: Response) => {
     updatedAt: new Date().toISOString(),
   };
 
-  const existingIdx = dbStore.state.soilProfiles.findIndex((s) => s.farmId === farm.id);
-  if (existingIdx >= 0) {
-    dbStore.state.soilProfiles[existingIdx] = soilProfile;
-  } else {
-    dbStore.state.soilProfiles.push(soilProfile);
-  }
-  dbStore.persist();
+  const saved = await SoilProfileModel.findOneAndUpdate(
+    { farmId: farm.id },
+    { $set: payload },
+    { new: true, upsert: true, runValidators: true }
+  ).lean<SoilProfile>();
 
-  res.json({ soil: soilProfile });
+  res.json({ soil: stripMongoId(saved) });
 });
 
 // ================= CROPS =================
-apiRouter.get('/crops', (_req, res: Response) => {
-  res.json({ crops: dbStore.state.crops });
+apiRouter.get('/crops', async (_req, res: Response) => {
+  const crops = await CropModel.find({}).lean();
+  res.json({ crops: crops.map((c) => stripMongoId(c)!) });
 });
 
-apiRouter.get('/crops/:id', (req, res: Response) => {
-  const crop = dbStore.state.crops.find((c) => c.id === req.params.id.toLowerCase());
+apiRouter.get('/crops/:id', async (req, res: Response) => {
+  const crop = await CropModel.findOne({ id: req.params.id.toLowerCase() }).lean();
   if (!crop) {
     res.status(404).json({ error: 'Crop not found.' });
     return;
   }
-  res.json({ crop });
+  res.json({ crop: stripMongoId(crop) });
 });
 
 // ================= ENVIRONMENTAL / NASA DATA =================
@@ -433,7 +501,10 @@ apiRouter.post('/climate/fetch', async (req, res: Response) => {
       forceRefresh?: boolean;
     };
 
-    const farm = dbStore.state.farms.find((f) => f.id === farmId) || dbStore.state.farms[0];
+    const farm = farmId
+      ? await FarmModel.findOne({ id: farmId }).lean<Farm>()
+      : await FarmModel.findOne({}).lean<Farm>();
+
     if (!farm) {
       res.status(404).json({ error: 'Farm not found.' });
       return;
@@ -441,31 +512,27 @@ apiRouter.post('/climate/fetch', async (req, res: Response) => {
 
     const days = Number(rangeDays) || 7;
     if (!forceRefresh) {
-      const cached = dbStore.state.climateObservations
-        .filter((c) => c.farmId === farm.id && c.rangeDays === days)
-        .sort((a, b) => b.fetchedAt.localeCompare(a.fetchedAt))[0];
+      const cached = await ClimateObservationModel.findOne({ farmId: farm.id, rangeDays: days })
+        .sort({ fetchedAt: -1 })
+        .lean<ClimateObservationRecord>();
       if (cached) {
-        res.json({ climate: cached, cached: true });
+        res.json({ climate: stripMongoId(cached), cached: true });
         return;
       }
     }
 
     const fresh = await fetchNasaPowerForCoordinates(farm.id, farm.latitude, farm.longitude, days);
-    // Keep up to latest observation per (farmId, rangeDays)
-    dbStore.state.climateObservations = dbStore.state.climateObservations.filter(
-      (c) => !(c.farmId === farm.id && c.rangeDays === days)
-    );
-    dbStore.state.climateObservations.push(fresh);
-    dbStore.persist();
+    await ClimateObservationModel.deleteMany({ farmId: farm.id, rangeDays: days });
+    const created = await ClimateObservationModel.create(fresh);
 
-    res.json({ climate: fresh, cached: false });
-  } catch (err) {
+    res.json({ climate: created.toJSON(), cached: false });
+  } catch {
     res.status(502).json({ error: 'Failed to retrieve NASA environmental observations.' });
   }
 });
 
 apiRouter.get('/climate/:farmId', async (req, res: Response) => {
-  const farm = dbStore.state.farms.find((f) => f.id === req.params.farmId);
+  const farm = await FarmModel.findOne({ id: req.params.farmId }).lean<Farm>();
   if (!farm) {
     res.status(404).json({ error: 'Farm not found.' });
     return;
@@ -476,12 +543,12 @@ apiRouter.get('/climate/:farmId', async (req, res: Response) => {
 });
 
 // ================= ROTATIONS =================
-apiRouter.get('/rotations/:farmId', (req, res: Response) => {
-  const plans = ensureDefaultRotationsForFarm(req.params.farmId);
+apiRouter.get('/rotations/:farmId', async (req, res: Response) => {
+  const plans = await ensureDefaultRotationsForFarm(req.params.farmId);
   res.json({ rotations: plans });
 });
 
-apiRouter.post('/rotations', (req, res: Response) => {
+apiRouter.post('/rotations', async (req, res: Response) => {
   const { farmId, label, sequence } = req.body as {
     farmId?: string;
     label?: string;
@@ -493,9 +560,10 @@ apiRouter.post('/rotations', (req, res: Response) => {
     return;
   }
 
-  const existing = ensureDefaultRotationsForFarm(farmId);
+  const existing = await ensureDefaultRotationsForFarm(farmId);
   const nextCodeLetter = String.fromCharCode(65 + existing.length);
-  const newPlan: RotationPlan = {
+
+  const created = await RotationPlanModel.create({
     id: `rot-${farmId}-${Date.now()}`,
     farmId,
     code: `Strategy ${nextCodeLetter}`,
@@ -504,11 +572,9 @@ apiRouter.post('/rotations', (req, res: Response) => {
     sequence: sequence.map((s) => s.trim()),
     isBaseline: false,
     createdAt: new Date().toISOString(),
-  };
+  });
 
-  dbStore.state.rotationPlans.push(newPlan);
-  dbStore.persist();
-  res.status(201).json({ rotation: newPlan });
+  res.status(201).json({ rotation: created.toJSON() });
 });
 
 // ================= ANALYSES =================
@@ -520,15 +586,19 @@ apiRouter.post('/analyses', optionalAuth, async (req: AuthenticatedRequest, res:
       rangeDays?: number;
     };
 
-    const farm = dbStore.state.farms.find((f) => f.id === farmId) || dbStore.state.farms[0];
+    const farm = farmId
+      ? await FarmModel.findOne({ id: farmId }).lean<Farm>()
+      : await FarmModel.findOne({}).lean<Farm>();
+
     if (!farm) {
       res.status(404).json({ error: 'Farm not found.' });
       return;
     }
 
-    const soil = dbStore.state.soilProfiles.find((s) => s.farmId === farm.id) || null;
+    const soilDoc = await SoilProfileModel.findOne({ farmId: farm.id }).lean<SoilProfile>();
+    const soil = stripMongoId(soilDoc);
     const climate = await ensureClimateForFarm(farm, Number(rangeDays) || 30);
-    const plans = ensureDefaultRotationsForFarm(farm.id);
+    const plans = await ensureDefaultRotationsForFarm(farm.id);
 
     const mergedPriorities: FarmerPriorities = {
       soilHealth: priorities?.soilHealth ?? DEFAULT_PRIORITIES.soilHealth,
@@ -538,8 +608,8 @@ apiRouter.post('/analyses', optionalAuth, async (req: AuthenticatedRequest, res:
       erosionReduction: priorities?.erosionReduction ?? DEFAULT_PRIORITIES.erosionReduction,
     };
 
-    const analysis = evaluateRotationStrategies({
-      farm,
+    const analysisData = evaluateRotationStrategies({
+      farm: stripMongoId(farm)!,
       soil,
       climate,
       plans,
@@ -547,63 +617,62 @@ apiRouter.post('/analyses', optionalAuth, async (req: AuthenticatedRequest, res:
       userId: req.user?.userId || 'user-farmer-joseph',
     });
 
-    dbStore.state.analyses.push(analysis);
-    dbStore.persist();
-
-    res.status(201).json({ analysis, climate, soil });
+    const savedAnalysis = await AnalysisModel.create(analysisData);
+    res.status(201).json({ analysis: savedAnalysis.toJSON(), climate, soil });
   } catch {
     res.status(500).json({ error: 'Failed to run rotation analysis.' });
   }
 });
 
 apiRouter.get('/analyses/farm/:farmId', async (req, res: Response) => {
-  const farm = dbStore.state.farms.find((f) => f.id === req.params.farmId);
+  const farm = await FarmModel.findOne({ id: req.params.farmId }).lean<Farm>();
   if (!farm) {
     res.status(404).json({ error: 'Farm not found.' });
     return;
   }
 
-  let latest = dbStore.state.analyses
-    .filter((a) => a.farmId === farm.id)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-
-  if (!latest) {
-    const soil = dbStore.state.soilProfiles.find((s) => s.farmId === farm.id) || null;
-    const climate = await ensureClimateForFarm(farm, 30);
-    const plans = ensureDefaultRotationsForFarm(farm.id);
-    latest = evaluateRotationStrategies({
-      farm,
-      soil,
-      climate,
-      plans,
-      priorities: DEFAULT_PRIORITIES,
-      userId: farm.ownerId,
-    });
-    dbStore.state.analyses.push(latest);
-    dbStore.persist();
+  const latest = await AnalysisModel.findOne({ farmId: farm.id }).sort({ createdAt: -1 }).lean();
+  if (latest) {
+    res.json({ analysis: stripMongoId(latest) });
+    return;
   }
 
-  res.json({ analysis: latest });
+  const soilDoc = await SoilProfileModel.findOne({ farmId: farm.id }).lean<SoilProfile>();
+  const soil = stripMongoId(soilDoc);
+  const climate = await ensureClimateForFarm(farm, 30);
+  const plans = await ensureDefaultRotationsForFarm(farm.id);
+
+  const generated = evaluateRotationStrategies({
+    farm: stripMongoId(farm)!,
+    soil,
+    climate,
+    plans,
+    priorities: DEFAULT_PRIORITIES,
+    userId: farm.ownerId,
+  });
+
+  const saved = await AnalysisModel.create(generated);
+  res.json({ analysis: saved.toJSON() });
 });
 
-apiRouter.get('/analyses/:id', (req, res: Response) => {
-  const analysis = dbStore.state.analyses.find((a) => a.id === req.params.id);
+apiRouter.get('/analyses/:id', async (req, res: Response) => {
+  const analysis = await AnalysisModel.findOne({ id: req.params.id }).lean();
   if (!analysis) {
     res.status(404).json({ error: 'Analysis not found.' });
     return;
   }
-  res.json({ analysis });
+  res.json({ analysis: stripMongoId(analysis) });
 });
 
 // ================= EXTENSION OFFICER REVIEWS =================
-apiRouter.get('/reviews/:analysisId', (req, res: Response) => {
-  const reviews = dbStore.state.reviews
-    .filter((r) => r.analysisId === req.params.analysisId)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  res.json({ reviews });
+apiRouter.get('/reviews/:analysisId', async (req, res: Response) => {
+  const reviews = await ReviewModel.find({ analysisId: req.params.analysisId })
+    .sort({ createdAt: -1 })
+    .lean<ExtensionReview[]>();
+  res.json({ reviews: reviews.map((r) => stripMongoId(r)!) });
 });
 
-apiRouter.post('/reviews', optionalAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/reviews', optionalAuth, async (req: AuthenticatedRequest, res: Response) => {
   const { analysisId, farmId, status, comments, flaggedRisks, missingInfoIdentified, reviewerName, reviewerRole } =
     req.body as {
       analysisId?: string;
@@ -621,40 +690,106 @@ apiRouter.post('/reviews', optionalAuth, (req: AuthenticatedRequest, res: Respon
     return;
   }
 
-  const newReview: ExtensionReview = {
+  const created = await ReviewModel.create({
     id: `rev-${Date.now()}`,
     analysisId,
     farmId: farmId || 'farm-oyo-pilot-1',
     reviewerId: req.user?.userId || 'user-extension-adebayo',
     reviewerName: reviewerName || req.user?.fullName || 'Dr. Adebayo Adeyemi',
-    reviewerRole: reviewerRole || (req.user?.role === 'extension_officer' ? 'Agricultural Extension Officer' : 'Agronomy Reviewer'),
+    reviewerRole:
+      reviewerRole || (req.user?.role === 'extension_officer' ? 'Agricultural Extension Officer' : 'Agronomy Reviewer'),
     status: status || 'Reviewed - Endorsed',
     comments: comments.trim(),
     flaggedRisks: Array.isArray(flaggedRisks) ? flaggedRisks.filter(Boolean) : [],
     missingInfoIdentified: Array.isArray(missingInfoIdentified) ? missingInfoIdentified.filter(Boolean) : [],
     createdAt: new Date().toISOString(),
-  };
+  });
 
-  dbStore.state.reviews.push(newReview);
-  dbStore.persist();
-  res.status(201).json({ review: newReview });
+  res.status(201).json({ review: created.toJSON() });
 });
 
 // ================= CONTACT FORM =================
-apiRouter.post('/contact', (req, res: Response) => {
+apiRouter.post('/contact', async (req, res: Response) => {
   const { name, email, message } = req.body as { name?: string; email?: string; message?: string };
   if (!name || !email || !message) {
     res.status(400).json({ error: 'Name, email, and message are required.' });
     return;
   }
-  const entry = {
+
+  const created = await ContactMessageModel.create({
     id: `msg-${Date.now()}`,
     name: name.trim(),
     email: email.trim(),
     message: message.trim(),
     createdAt: new Date().toISOString(),
-  };
-  dbStore.state.contactMessages.push(entry);
-  dbStore.persist();
-  res.status(201).json({ received: true, id: entry.id });
+  });
+
+  res.status(201).json({ received: true, id: created.id });
 });
+
+// ================= NIGERIA LOCATIONS & GEOCODING API =================
+apiRouter.get('/locations/states', (_req, res: Response) => {
+  const states = NIGERIA_LOCATIONS.map((s) => ({
+    name: s.name,
+    capital: s.capital,
+    zone: s.zone,
+    lat: s.lat,
+    lng: s.lng,
+  }));
+  res.json({ states });
+});
+
+apiRouter.get('/locations/lgas', (req, res: Response) => {
+  const stateParam = String(req.query.state || 'Oyo State').trim().toLowerCase();
+  const cleanParam = stateParam.replace(/\s*state\s*/g, '').trim();
+  const stateEntry =
+    NIGERIA_LOCATIONS.find((s) => {
+      const target = s.name.toLowerCase().replace(/\s*state\s*/g, '').trim();
+      return s.name.toLowerCase() === stateParam || target === cleanParam;
+    }) || NIGERIA_LOCATIONS[0];
+
+  res.json({
+    state: stateEntry.name,
+    lgas: stateEntry.lgas,
+  });
+});
+
+apiRouter.get('/locations/cities', (req, res: Response) => {
+  const stateParam = String(req.query.state || 'Oyo State').trim().toLowerCase();
+  const lgaParam = String(req.query.lga || '').trim().toLowerCase();
+
+  const stateEntry =
+    NIGERIA_LOCATIONS.find((s) => s.name.toLowerCase() === stateParam) || NIGERIA_LOCATIONS[0];
+  const lgaEntry =
+    stateEntry.lgas.find((l) => l.name.toLowerCase() === lgaParam) || stateEntry.lgas[0];
+
+  res.json({
+    state: stateEntry.name,
+    lga: lgaEntry.name,
+    lat: lgaEntry.lat,
+    lng: lgaEntry.lng,
+    cities: lgaEntry.cities,
+  });
+});
+
+apiRouter.get('/locations/reverse', async (req, res: Response) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (Number.isNaN(lat) || Number.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+    res.status(400).json({ error: 'Valid lat and lng query parameters are required.' });
+    return;
+  }
+  const result = await reverseGeocodeCoordinates(lat, lng);
+  res.json(result);
+});
+
+apiRouter.get('/locations/geocode', async (req, res: Response) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) {
+    res.status(400).json({ error: 'Query parameter q is required.' });
+    return;
+  }
+  const result = await forwardGeocodePlace(q);
+  res.json({ result });
+});
+

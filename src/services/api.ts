@@ -126,4 +126,46 @@ export const api = {
     send: (payload: { name: string; email: string; message: string }) =>
       request<{ received: boolean; id: string }>('/contact', { method: 'POST', body: JSON.stringify(payload) }),
   },
+
+  locations: {
+    getStates: () =>
+      request<{ states: Array<{ name: string; capital: string; zone: string; lat: number; lng: number }> }>(
+        '/locations/states'
+      ),
+    getLgas: (state: string) =>
+      request<{
+        state: string;
+        lgas: Array<{ name: string; lat: number; lng: number; cities: string[] }>;
+      }>(`/locations/lgas?state=${encodeURIComponent(state)}`),
+    getCities: (state: string, lga: string) =>
+      request<{
+        state: string;
+        lga: string;
+        lat: number;
+        lng: number;
+        cities: string[];
+      }>(`/locations/cities?state=${encodeURIComponent(state)}&lga=${encodeURIComponent(lga)}`),
+    reverseGeocode: (lat: number, lng: number) =>
+      request<{
+        state: string;
+        lga: string;
+        city: string;
+        country: string;
+        latitude: number;
+        longitude: number;
+        displayName: string;
+        source: string;
+      }>(`/locations/reverse?lat=${lat}&lng=${lng}`),
+    search: (q: string) =>
+      request<{
+        result: {
+          state: string;
+          lga: string;
+          city: string;
+          latitude: number;
+          longitude: number;
+          source: string;
+        } | null;
+      }>(`/locations/geocode?q=${encodeURIComponent(q)}`),
+  },
 };

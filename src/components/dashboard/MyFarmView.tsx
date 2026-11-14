@@ -6,6 +6,7 @@ import {
   FlaskConical,
   MapPin,
   Plus,
+  Search,
   Sprout,
   Trash2,
 } from 'lucide-react';
@@ -24,18 +25,20 @@ interface MyFarmViewProps {
   onSelectFarm: (farmId: string) => void;
 }
 
-const OYO_LGAS = [
-  'Akinyele',
-  'Oyo East',
-  'Oyo West',
-  'Afijio',
-  'Atiba',
-  'Egbeda',
-  'Ido',
-  'Iseyin',
-  'Ogbomoso North',
-  'Saki West',
-];
+interface StateOption {
+  name: string;
+  capital: string;
+  zone: string;
+  lat: number;
+  lng: number;
+}
+
+interface LgaOption {
+  name: string;
+  lat: number;
+  lng: number;
+  cities: string[];
+}
 
 export function MyFarmView({
   farms,
@@ -48,10 +51,17 @@ export function MyFarmView({
 }: MyFarmViewProps) {
   const [isAddingNew, setIsAddingNew] = useState(false);
 
+  const [statesList, setStatesList] = useState<StateOption[]>([]);
+  const [lgasList, setLgasList] = useState<LgaOption[]>([]);
+  const [citiesList, setCitiesList] = useState<string[]>([]);
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [detectingLocation, setDetectingLocation] = useState(false);
+
   const [name, setName] = useState(activeFarm.name);
   const [sizeHectares, setSizeHectares] = useState(String(activeFarm.sizeHectares));
   const [state, setState] = useState(activeFarm.state);
   const [lga, setLga] = useState(activeFarm.lga);
+  const [city, setCity] = useState(activeFarm.city || '');
   const [latitude, setLatitude] = useState(String(activeFarm.latitude));
   const [longitude, setLongitude] = useState(String(activeFarm.longitude));
   const [soilType, setSoilType] = useState(activeFarm.soilType);
@@ -85,12 +95,46 @@ export function MyFarmView({
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState('');
 
+  // Load Nigerian States on mount
+  useEffect(() => {
+    api.locations
+      .getStates()
+      .then((res) => setStatesList(res.states))
+      .catch(() => {});
+  }, []);
+
+  // Load LGAs & Cities whenever State changes
+  useEffect(() => {
+    if (!state) return;
+    api.locations
+      .getLgas(state)
+      .then((res) => {
+        setLgasList(res.lgas);
+        const matched = res.lgas.find((item) => item.name.toLowerCase() === lga.toLowerCase());
+        if (matched) {
+          setCitiesList(matched.cities);
+        } else if (res.lgas[0]) {
+          setCitiesList(res.lgas[0].cities);
+        }
+      })
+      .catch(() => {});
+  }, [state]);
+
+  // Update city options whenever LGA changes
+  useEffect(() => {
+    const matched = lgasList.find((item) => item.name.toLowerCase() === lga.toLowerCase());
+    if (matched) {
+      setCitiesList(matched.cities);
+    }
+  }, [lga, lgasList]);
+
   useEffect(() => {
     if (isAddingNew) return;
     setName(activeFarm.name);
     setSizeHectares(String(activeFarm.sizeHectares));
     setState(activeFarm.state);
     setLga(activeFarm.lga);
+    setCity(activeFarm.city || '');
     setLatitude(String(activeFarm.latitude));
     setLongitude(String(activeFarm.longitude));
     setSoilType(activeFarm.soilType);
@@ -122,6 +166,7 @@ export function MyFarmView({
     setSizeHectares('2.0');
     setState('Oyo State');
     setLga('Akinyele');
+    setCity('Moniya');
     setLatitude('7.5308');
     setLongitude('3.9125');
     setSoilType('Loamy Soil (Sandy Loam)');
@@ -142,19 +187,99 @@ export function MyFarmView({
     setError('');
   }
 
+  async function autoPopulateFromCoordinates(lat: number, lng: number, originLabel: string) {
+    setDetectingLocation(true);
+    setError('');
+    try {
+      const geo = await api.locations.reverseGeocode(lat, lng);
+      setState(geo.state);
+      setLga(geo.lga);
+      setCity(geo.city);
+      setFeedback(
+        `${originLabel}: Auto-detected ${geo.city}, ${geo.lga} LGA, ${geo.state} (${lat.toFixed(4)}°N, ${lng.toFixed(
+          4
+        )}°E).`
+      );
+    } catch {
+      setFeedback(`${originLabel}: Coordinates updated to ${lat.toFixed(4)}°N, ${lng.toFixed(4)}°E.`);
+    } finally {
+      setDetectingLocation(false);
+    }
+  }
+
+  function handleStateChange(nextState: string) {
+    setState(nextState);
+    api.locations
+      .getLgas(nextState)
+      .then((res) => {
+        setLgasList(res.lgas);
+        const firstLga = res.lgas[0];
+        if (firstLga) {
+          setLga(firstLga.name);
+          setCity(firstLga.cities[0] || '');
+          setCitiesList(firstLga.cities);
+          setLatitude(String(firstLga.lat));
+          setLongitude(String(firstLga.lng));
+          setFeedback(`Auto-selected ${firstLga.name} LGA (${nextState}) and updated coordinates.`);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function handleLgaChange(nextLga: string) {
+    setLga(nextLga);
+    const matched = lgasList.find((item) => item.name === nextLga);
+    if (matched) {
+      setCitiesList(matched.cities);
+      setCity(matched.cities[0] || '');
+      setLatitude(String(matched.lat));
+      setLongitude(String(matched.lng));
+      setFeedback(`Auto-located ${matched.cities[0] || nextLga}, ${nextLga} LGA (${matched.lat}°N, ${matched.lng}°E).`);
+    }
+  }
+
+  async function handleSearchPlace() {
+    if (!placeQuery.trim()) return;
+    setDetectingLocation(true);
+    setError('');
+    try {
+      const res = await api.locations.search(placeQuery.trim());
+      if (res.result) {
+        setState(res.result.state);
+        setLga(res.result.lga);
+        setCity(res.result.city);
+        setLatitude(String(res.result.latitude));
+        setLongitude(String(res.result.longitude));
+        setFeedback(
+          `Found ${res.result.city}, ${res.result.lga} LGA, ${res.result.state} (${res.result.latitude}°N, ${res.result.longitude}°E).`
+        );
+      } else {
+        setError('Place not found. Try a Nigerian town, city, or LGA name (e.g., Iseyin, Moniya, Ogbomoso).');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Location search failed.');
+    } finally {
+      setDetectingLocation(false);
+    }
+  }
+
   function handleUseGeolocation() {
     if (!navigator.geolocation) {
       setError('Geolocation is not supported by this browser.');
       return;
     }
+    setDetectingLocation(true);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setLatitude(pos.coords.latitude.toFixed(5));
-        setLongitude(pos.coords.longitude.toFixed(5));
-        setFeedback('Coordinates updated from browser GPS.');
+        const lat = Number(pos.coords.latitude.toFixed(5));
+        const lng = Number(pos.coords.longitude.toFixed(5));
+        setLatitude(String(lat));
+        setLongitude(String(lng));
+        autoPopulateFromCoordinates(lat, lng, 'GPS');
       },
       () => {
-        setError('Could not access GPS location. You can click directly on the map instead.');
+        setDetectingLocation(false);
+        setError('Could not access GPS location. You can click directly on the map or search a town instead.');
       }
     );
   }
@@ -177,6 +302,7 @@ export function MyFarmView({
           sizeHectares: Number(sizeHectares),
           state,
           lga,
+          city,
           latitude: Number(latitude),
           longitude: Number(longitude),
           soilType,
@@ -206,6 +332,7 @@ export function MyFarmView({
           sizeHectares: Number(sizeHectares),
           state,
           lga,
+          city,
           latitude: Number(latitude),
           longitude: Number(longitude),
           soilType,
@@ -312,34 +439,86 @@ export function MyFarmView({
                   className="w-full px-3.5 py-2 rounded-lg border border-[#CFE2D0] text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
                 />
               </div>
-              <div className="space-y-1">
-                <label className="text-xs font-semibold text-[#233B2A]">State</label>
+            </div>
+
+            {/* Auto-locate Place Search */}
+            <div className="flex flex-col sm:flex-row gap-2">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-[#6B8271] absolute left-3 top-2.5" />
                 <input
                   type="text"
-                  required
-                  value={state}
-                  onChange={(e) => setState(e.target.value)}
-                  className="w-full px-3.5 py-2 rounded-lg border border-[#CFE2D0] text-sm focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                  value={placeQuery}
+                  onChange={(e) => setPlaceQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleSearchPlace();
+                    }
+                  }}
+                  placeholder="Auto-fill by searching town, city, or LGA (e.g., Moniya, Iseyin, Ogbomoso)..."
+                  className="w-full pl-9 pr-3 py-2 rounded-lg border border-[#CFE2D0] text-xs bg-[#F8FBF8] focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
                 />
               </div>
+              <button
+                type="button"
+                onClick={handleSearchPlace}
+                disabled={detectingLocation}
+                className="px-4 py-2 rounded-lg border border-[#0B4D1E] text-xs font-semibold text-[#0B4D1E] hover:bg-[#EAF6EB] transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap"
+              >
+                {detectingLocation ? 'Detecting...' : 'Auto-Locate Place'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="space-y-1">
-                <label className="text-xs font-semibold text-[#233B2A]">Local Government Area (LGA)</label>
+                <label className="text-xs font-semibold text-[#233B2A]">State *</label>
                 <select
-                  value={lga}
-                  onChange={(e) => setLga(e.target.value)}
-                  className="w-full px-3.5 py-2 rounded-lg border border-[#CFE2D0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                  value={state}
+                  onChange={(e) => handleStateChange(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-[#CFE2D0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
                 >
-                  {OYO_LGAS.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
+                  {statesList.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}
                     </option>
                   ))}
-                  {!OYO_LGAS.includes(lga) && <option value={lga}>{lga}</option>}
+                  {!statesList.some((s) => s.name === state) && <option value={state}>{state}</option>}
                 </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-[#233B2A]">Local Government (LGA) *</label>
+                <select
+                  value={lga}
+                  onChange={(e) => handleLgaChange(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg border border-[#CFE2D0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                >
+                  {lgasList.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}
+                    </option>
+                  ))}
+                  {!lgasList.some((l) => l.name === lga) && <option value={lga}>{lga}</option>}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-[#233B2A]">City / Town (Auto-generated)</label>
+                <input
+                  type="text"
+                  list="agrolens-cities-list"
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="Auto-filled or type town"
+                  className="w-full px-3 py-2 rounded-lg border border-[#CFE2D0] text-sm focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                />
+                <datalist id="agrolens-cities-list">
+                  {citiesList.map((c) => (
+                    <option key={c} value={c} />
+                  ))}
+                </datalist>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
               <div className="space-y-1">
                 <label className="text-xs font-semibold text-[#233B2A]">Latitude (°N)</label>
                 <input
@@ -365,10 +544,20 @@ export function MyFarmView({
               <button
                 type="button"
                 onClick={handleUseGeolocation}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#0B4D1E] text-white text-xs font-semibold hover:bg-[#146C2E] transition-colors cursor-pointer"
+                disabled={detectingLocation}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-[#0B4D1E] text-white text-xs font-semibold hover:bg-[#146C2E] transition-colors cursor-pointer disabled:opacity-60"
               >
                 <Compass className="w-3.5 h-3.5" />
-                Use My Location
+                Use My GPS
+              </button>
+              <button
+                type="button"
+                onClick={() => autoPopulateFromCoordinates(parsedLat, parsedLng, 'Coordinate Lookup')}
+                disabled={detectingLocation}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[#CFE2D0] bg-[#F4F8F4] text-[#0B4D1E] text-xs font-semibold hover:bg-[#EAF6EB] transition-colors cursor-pointer disabled:opacity-60"
+              >
+                <MapPin className="w-3.5 h-3.5" />
+                Auto-Fill Address
               </button>
             </div>
           </div>
@@ -591,7 +780,7 @@ export function MyFarmView({
               onCoordinateSelect={(lat, lng) => {
                 setLatitude(String(lat));
                 setLongitude(String(lng));
-                setFeedback(`Map pin moved to ${lat}°N, ${lng}°E — click Save to persist.`);
+                autoPopulateFromCoordinates(lat, lng, 'Map Pin');
               }}
             />
 
@@ -659,7 +848,7 @@ export function MyFarmView({
                       )}
                     </td>
                     <td className="py-3 pr-4 text-[#364F3D]">
-                      {f.lga}, {f.state}
+                      {f.city ? `${f.city}, ` : ''}{f.lga}, {f.state}
                     </td>
                     <td className="py-3 pr-4 font-mono text-xs text-[#4B6352] tabular-nums">
                       {f.latitude.toFixed(4)}°N, {f.longitude.toFixed(4)}°E

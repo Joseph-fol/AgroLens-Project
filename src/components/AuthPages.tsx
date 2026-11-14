@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -42,6 +42,9 @@ export function AuthPages({ mode, onSwitchMode, onBackHome, onAuthenticated }: A
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  const [statesList, setStatesList] = useState<string[]>(NIGERIA_STATES);
+  const [lgasList, setLgasList] = useState<string[]>(['Akinyele', 'Oyo East', 'Iseyin']);
+
   // Sign In fields
   const [loginEmail, setLoginEmail] = useState('joseph@agrolens.ng');
   const [loginPassword, setLoginPassword] = useState('agrolens2026');
@@ -51,9 +54,30 @@ export function AuthPages({ mode, onSwitchMode, onBackHome, onAuthenticated }: A
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [state, setState] = useState('Oyo State');
+  const [lga, setLga] = useState('Akinyele');
   const [role, setRole] = useState<UserRole>('farmer');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+
+  useEffect(() => {
+    api.locations
+      .getStates()
+      .then((res) => setStatesList(res.states.map((s) => s.name)))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    api.locations
+      .getLgas(state)
+      .then((res) => {
+        const names = res.lgas.map((l) => l.name);
+        setLgasList(names);
+        if (names.length > 0 && !names.includes(lga)) {
+          setLga(names[0]);
+        }
+      })
+      .catch(() => {});
+  }, [state]);
 
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
@@ -102,6 +126,7 @@ export function AuthPages({ mode, onSwitchMode, onBackHome, onAuthenticated }: A
         email,
         phone,
         state,
+        lga,
         role,
         password,
       });
@@ -331,23 +356,37 @@ export function AuthPages({ mode, onSwitchMode, onBackHome, onAuthenticated }: A
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="space-y-1">
-                    <label className="text-xs font-semibold text-[#233B2A]">Location (State)</label>
+                    <label className="text-xs font-semibold text-[#233B2A]">State</label>
                     <div className="relative">
-                      <MapPin className="w-4 h-4 text-[#6B8271] absolute left-3.5 top-3" />
+                      <MapPin className="w-4 h-4 text-[#6B8271] absolute left-3 top-3" />
                       <select
                         value={state}
                         onChange={(e) => setState(e.target.value)}
-                        className="w-full pl-10 pr-3 py-2.5 rounded-lg border border-[#CFE2D0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                        className="w-full pl-9 pr-2 py-2.5 rounded-lg border border-[#CFE2D0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
                       >
-                        {NIGERIA_STATES.map((s) => (
+                        {statesList.map((s) => (
                           <option key={s} value={s}>
                             {s}
                           </option>
                         ))}
                       </select>
                     </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-[#233B2A]">LGA</label>
+                    <select
+                      value={lga}
+                      onChange={(e) => setLga(e.target.value)}
+                      className="w-full px-3 py-2.5 rounded-lg border border-[#CFE2D0] text-sm bg-white focus:outline-none focus:ring-2 focus:ring-[#16A34A]"
+                    >
+                      {lgasList.map((item) => (
+                        <option key={item} value={item}>
+                          {item}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                   <div className="space-y-1">
                     <label className="text-xs font-semibold text-[#233B2A]">Account Role</label>
