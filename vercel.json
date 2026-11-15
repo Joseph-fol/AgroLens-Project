@@ -1,6 +1,9 @@
 {
   "$schema": "https://vercel.sh",
   "version": 2,
+  "framework": null,
+  "buildCommand": "bun run build:api",
+  "outputDirectory": "public",
   "rewrites": [
     {
       "source": "/",
