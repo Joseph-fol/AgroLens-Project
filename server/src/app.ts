@@ -8,7 +8,7 @@ export interface BackendAppOptions {
   standaloneApiServer?: boolean;
 }
 
-)
+
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'http://localhost:3000',
