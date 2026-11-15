@@ -8,7 +8,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 const isVercel = Boolean(process.env.VERCEL);
 
-const app = createBackendApp({ standaloneApiServer: isVercel });
+const app = createBackendApp({ standaloneApiServer: false });
 let isDatabaseConnected = false;
 
 async function ensureDatabase() {
