@@ -52,11 +52,17 @@ async function startLocalServer() {
 
 // Only start the persistent HTTP listener when NOT running on Vercel
 if (!isVercel) {
+  app.get('/', (_req, res) => {
+    res.send('Server is working perfectly');
+  });
+  
+} else {
   startLocalServer().catch((err) => {
     console.error('Failed to start AgroLens server:', err);
     process.exit(1);
   });
 }
+
 
 // Export the serverless request handler for Vercel
 export default async function handler(req: any, res: any) {
